@@ -56,7 +56,7 @@ const int rtcSCL        = 2; // Real Time Clock SCL (i2c ESP8266 NodeMCU 0.9)
 // Misc Settings
 const unsigned long millisPerDay    = 86400000; // Milliseconds per day
 const unsigned long debounceWait    =      200; // Door debounce timer (200 ms)
-const unsigned long lightReadRate   =     1000; // How often to read light level (1 sec)
+const unsigned long lightReadRate   =     5000; // How often to read light level (1 sec)
 const unsigned long remoteOverride  =   600000; // Length of time to lockout readings. (10 min)
 const unsigned long publishInterval =    60000; // How often to publish light sensor readings. (1 min)
 const int           lsLow           =        0; // Light Sensor lowest reading
@@ -252,13 +252,17 @@ void mqttData(char* topic, byte* payload, unsigned int plen) {
 
   // Sync RTC to time beacon once/day
   if (strcmp(topic,sTime)==0) {
-   // if (lastRTCSync == 0 || ((unsigned long)(millis() - lastRTCSync) > millisPerDay)) {
+    if (lastRTCSync == 0 || ((unsigned long)(millis() - lastRTCSync) > millisPerDay)) {
       RTC.adjust(strtoul(data.c_str(), NULL, 0));
       lastRTCSync = millis();
       if (Debugging) {
         DateTime now = RTC.now();
         char dateStr[10];
         char timeStr[8];
+        if(Debugging){
+          Serial.print("Month:");
+          Serial.println(now.month(),DEC);
+        }
         sprintf(dateStr, "%02d/%02d/%04d", now.month(), now.day(), now.year());
         int hr = now.hour();
         boolean ampm = false;
@@ -282,9 +286,8 @@ void mqttData(char* topic, byte* payload, unsigned int plen) {
         else {
           Serial.println("am");
         }
-        Serial.println(__DATE__);
-        Serial.println(__TIME__);
-  //    }
+
+      }
     }
   }
 }
@@ -381,7 +384,7 @@ void handleSensorReadings() {
   DateTime now = RTC.now();
   // If nightlock is enabled, and we are within the designated time period, simply
   // ensure door is closed.
-  /*
+
   if (nightLock && (now.hour() >= nightLockStart || now.hour() <= nightLockEnd)) {
 
     // Close door if it is open
@@ -400,8 +403,6 @@ void handleSensorReadings() {
   // NOTE: We need a bit of a gap between these thresholds to prevent
   // bouncing if light readings fluctuate by a percentage or two.
   else {
-  */
-
     // Open door when brightness level is greater than 5%
     if (brightness >= 5) {
       if (doorState == "closed") {
@@ -426,7 +427,7 @@ void handleSensorReadings() {
         }
       }
     }
-  //}
+  }
 }
 
 /**
@@ -484,21 +485,25 @@ void setup() {
   if (Debugging) {
     Serial.begin(115200);
     Serial.println("Initialising...");
-    Serial.println(__DATE__);
-    Serial.println(__TIME__);
   }
-  Wire.begin();
-  RTC.begin();
-  if (!RTC.isrunning() || false) {
+  Wire.begin(rtcSDA,rtcSCL);
+  if (! RTC.begin()) {
+    Serial.println("Couldn't find RTC");
+    while (1);
+  }
+  if (! RTC.isrunning() ) {
     //clockmode = NOT_SET;
+    if (Debugging) {
+       Serial.println("RTC is not running");
+    }
     RTC.adjust(DateTime(__DATE__, __TIME__));
   }
   if (Debugging) {
-    Serial.print("RTC time is: ");
     DateTime now = RTC.now();
-    Serial.print(now.hour());
+    Serial.print("RTC time is: ");    
+    Serial.print(now.hour(),DEC);
     Serial.print(":");
-    Serial.println(now.minute());
+    Serial.println(now.minute(),DEC);
   }
   
   if (Debugging) {
