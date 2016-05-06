@@ -16,8 +16,8 @@ const int Debugging = 1;
 // Digital & analog pins for various components
 
 const int lightSense    = A0; // Light Sensor
-const int doorOpen      = 13; // MotorA left
-const int doorClose     = 15; // MotorA right
+const int doorOpen      = 12; // MotorA CCW UP
+const int doorClose     = 14; // MotorA CW DOWN
 const int doorTop       = 5; // Reed Switch
 const int doorBottom    = 4; // Reed Switch
 const int rtcSDA        = 0; // Real Time Clock SDA (i2c ESP8266 NodeMCU 0.9)
@@ -56,7 +56,7 @@ const int rtcSCL        = 2; // Real Time Clock SCL (i2c ESP8266 NodeMCU 0.9)
 // Misc Settings
 const unsigned long millisPerDay    = 86400000; // Milliseconds per day
 const unsigned long debounceWait    =      200; // Door debounce timer (200 ms)
-const unsigned long lightReadRate   =     5000; // How often to read light level (1 sec)
+const unsigned long lightReadRate   =     1000; // How often to read light level (1 sec)
 const unsigned long remoteOverride  =   600000; // Length of time to lockout readings. (10 min)
 const unsigned long publishInterval =    60000; // How often to publish light sensor readings. (1 min)
 const int           lsLow           =        0; // Light Sensor lowest reading
@@ -93,15 +93,6 @@ int           doorBottomPrev     =     0;
 uint32_t      bootTime           =     0;
 
 RTC_DS1307 RTC;
-
-
-/*#if Debugging > 0
-  ESP esp(&espPort, &debugger, chpdPin);
-#else
-  ESP esp(&espPort, chpdPin);
-#endif
-*/
-
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
 
@@ -112,7 +103,7 @@ boolean wifiConnected = false;
  */
 //void wifiCb(char* topic, byte* data, unsigned int length) {
 void wifiCb(WiFiEvent_t event) {
-  Serial.printf("[WiFi-event] event: %d\n", event);
+  Serial.printf("\n[WiFi-event] event: %d\n", event);
 
   switch(event) {
       case WIFI_EVENT_STAMODE_GOT_IP:
@@ -217,6 +208,12 @@ void mqttData(char* topic, byte* payload, unsigned int plen) {
     // If door movement is triggered, toggle door state to
     // opening or closing based on current state.
     // If door is currently moving, the trigger is ignored.
+    if (data == "unlock") {  // this will immediately put the system back into normal operation (i.e., using the light sensor)
+      remoteLockStart = 0;
+      if(Debugging) {
+        Serial.println("remoteLockStart unset");
+      }      
+    }
     if (data == "door") {
       if(Debugging) {
         Serial.println("remoteLockStart set");
@@ -259,10 +256,7 @@ void mqttData(char* topic, byte* payload, unsigned int plen) {
         DateTime now = RTC.now();
         char dateStr[10];
         char timeStr[8];
-        if(Debugging){
-          Serial.print("Month:");
-          Serial.println(now.month(),DEC);
-        }
+
         sprintf(dateStr, "%02d/%02d/%04d", now.month(), now.day(), now.year());
         int hr = now.hour();
         boolean ampm = false;
@@ -279,6 +273,7 @@ void mqttData(char* topic, byte* payload, unsigned int plen) {
         sprintf(timeStr, "%02d:%02d:%02d", hr, now.minute(), now.second());
         Serial.println("RTC Updated:");
         Serial.println(dateStr);
+        Serial.print(" ");
         Serial.print(timeStr);
         if (ampm) {
           Serial.println("pm");
@@ -485,7 +480,27 @@ void setup() {
   if (Debugging) {
     Serial.begin(115200);
     Serial.println("Initialising...");
+    Serial.println("Setting motor status to STOP");
   }
+
+  // Set the outputs
+  digitalWrite(doorOpen, STOP);
+  digitalWrite(doorClose, STOP);
+  digitalWrite(doorTop, HIGH);
+  digitalWrite(doorBottom, HIGH);
+  
+  pinMode(doorOpen, OUTPUT);
+  pinMode(doorClose, OUTPUT);
+  pinMode(doorTop, INPUT_PULLUP);
+  pinMode(doorBottom, INPUT_PULLUP);
+
+// Again, just in case
+  digitalWrite(doorOpen, STOP);
+  digitalWrite(doorClose, STOP);
+  digitalWrite(doorTop, HIGH);
+  digitalWrite(doorBottom, HIGH);
+
+  
   Wire.begin(rtcSDA,rtcSCL);
   if (! RTC.begin()) {
     Serial.println("Couldn't find RTC");
@@ -618,7 +633,6 @@ void setup() {
  * Main program loop
  */
 void loop() {
-  //esp.process();
   mqtt.loop();
   // 5 second pause on initial startup to let devices settle, wifi connect, etc.
   if (millis() > 5000) {
