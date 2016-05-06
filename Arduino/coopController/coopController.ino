@@ -254,8 +254,8 @@ void mqttData(char* topic, byte* payload, unsigned int plen) {
       lastRTCSync = millis();
       if (Debugging) {
         DateTime now = RTC.now();
-        char dateStr[10];
-        char timeStr[8];
+        char dateStr[11];
+        char timeStr[9];
 
         sprintf(dateStr, "%02d/%02d/%04d", now.month(), now.day(), now.year());
         int hr = now.hour();
@@ -273,7 +273,6 @@ void mqttData(char* topic, byte* payload, unsigned int plen) {
         sprintf(timeStr, "%02d:%02d:%02d", hr, now.minute(), now.second());
         Serial.println("RTC Updated:");
         Serial.println(dateStr);
-        Serial.print(" ");
         Serial.print(timeStr);
         if (ampm) {
           Serial.println("pm");
