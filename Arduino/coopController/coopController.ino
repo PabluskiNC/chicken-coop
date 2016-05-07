@@ -1,8 +1,12 @@
 /**
  * \file
  *       Arduino Chicken Coop Controller
- * \author
+ * \Original author
  *       Will Vincent <will@willvincent.com>
+ * \Forked by
+ *       Pablo Sanchez <pablo@pablo-sanchez.com>
+ * \ Description
+ * This Sketch is designed to work on a ESP-8266 MUANODE 0.9 board
  */
 
 #include <Wire.h>
@@ -22,11 +26,6 @@ const int doorTop       = 5; // Reed Switch
 const int doorBottom    = 4; // Reed Switch
 const int rtcSDA        = 0; // Real Time Clock SDA (i2c ESP8266 NodeMCU 0.9)
 const int rtcSCL        = 2; // Real Time Clock SCL (i2c ESP8266 NodeMCU 0.9)
-
-// ESP8266 Settings
-//#define debugger Serial // Pins 0 and 1
-//#define espPort Serial1 // Pins 18 and 19
-//const int chpdPin = 3;
 
 // WIFI Settings
 #define wHost "secure2"
@@ -56,7 +55,7 @@ const int rtcSCL        = 2; // Real Time Clock SCL (i2c ESP8266 NodeMCU 0.9)
 // Misc Settings
 const unsigned long millisPerDay    = 86400000; // Milliseconds per day
 const unsigned long debounceWait    =      200; // Door debounce timer (200 ms)
-const unsigned long lightReadRate   =     1000; // How often to read light level (1 sec)
+const unsigned long lightReadRate   =    10000; // How often to read light level (5 sec)
 const unsigned long remoteOverride  =   600000; // Length of time to lockout readings. (10 min)
 const unsigned long publishInterval =    60000; // How often to publish light sensor readings. (1 min)
 const int           lsLow           =        0; // Light Sensor lowest reading
@@ -101,7 +100,6 @@ boolean wifiConnected = false;
 /**
  * Manage WIFI connection
  */
-//void wifiCb(char* topic, byte* data, unsigned int length) {
 void wifiCb(WiFiEvent_t event) {
   Serial.printf("\n[WiFi-event] event: %d\n", event);
 
@@ -131,32 +129,39 @@ void wifiCb(WiFiEvent_t event) {
  * Subscribes to desired channels
  */
 void mqttConnected() {
-  if (Debugging) {
-    Serial.println("MQTT Connected");
-  }
+  if (wifiConnected) {
+     if (Debugging) {
+       Serial.println("MQTT Connected");
+     }
+     // Subscribe to time beacon channel to keep RTC up to date.
+     mqtt.subscribe(sTime, 0);
 
-  // Subscribe to time beacon channel to keep RTC up to date.
-  mqtt.subscribe(sTime, 0);
+     // Subscribe to remote trigger channel to allow remote control of chicken coop
+     mqtt.subscribe(sRemote, 1);
 
-  // Subscribe to remote trigger channel to allow remote control of chicken coop
-  mqtt.subscribe(sRemote, 1);
-
-  // Subscribe to sunrise/set updates
-  mqtt.subscribe(sSunRise, 1);
-  mqtt.subscribe(sSunSet, 1);
+     // Subscribe to sunrise/set updates
+     mqtt.subscribe(sSunRise, 1);
+     mqtt.subscribe(sSunSet, 1);
   
-  // Publish that we're online!
-  mqtt.publish("client/online", "1");
+     // Publish that we're online!
+     mqtt.publish("client/online", "1");
+  } else {
+     if (Debugging) {
+       Serial.println("MQTT NOT Connected because WIFI is not connected");
+     }
+  }
 }
 
 /**
  * MQTT Disconnect event handler.
  */
+ /*
 void mqttDisconnected(void* response) {
   if (Debugging) {
     Serial.println("MQTT Disconnected");
   }
 }
+*/
 
 /**
  * MQTT Publish event handler.
@@ -185,7 +190,6 @@ void mqttDisconnected(void* response) {
  *
  * This allows us to remotely trigger events via WIFI!
  */
-// void mqttData(void* response) {
 void mqttData(char* topic, byte* payload, unsigned int plen) {
   
   byte* p = (byte *)malloc(plen+1);
@@ -293,8 +297,10 @@ void publishReadings() {
 
   // Since the webapp likes to get confused, lets remind them we're
   // online every time we update brightness and temp readings...
-  
-  mqtt.publish("client/online", "1");
+
+  if (wifiConnected) {
+     mqtt.publish("client/online", "1");
+  }
   if (Debugging) {
       Serial.print("mqtt publish. Status: ");
       Serial.println(mqtt.state());
@@ -354,8 +360,10 @@ void readSensors() {
     
     char buf[100];
     String pubString = String(brightness);; 
-    pubString.toCharArray(buf, pubString.length()+1); 
-    mqtt.publish(pLight, buf);
+    pubString.toCharArray(buf, pubString.length()+1);
+    if (wifiConnected) { 
+       mqtt.publish(pLight, buf);
+    }
 
     if (Debugging) {
       Serial.print("Brightness is ");
@@ -378,8 +386,10 @@ void handleSensorReadings() {
   DateTime now = RTC.now();
   // If nightlock is enabled, and we are within the designated time period, simply
   // ensure door is closed.
-
-  if (nightLock && (now.hour() >= nightLockStart || now.hour() <= nightLockEnd)) {
+  //if(Debugging) {
+  //  Serial.printf("Nightlock: %i, Time: %0d:%0d\n",nightLock, now.hour(),now.minute());
+  //}
+  if (nightLock && ( (now.hour() >= nightLockStart || now.hour() <= nightLockEnd)) ) {
 
     // Close door if it is open
     if (doorState == "open") {
@@ -444,6 +454,7 @@ void debounceDoor() {
           if (doorTopPrev != doorTopState) {
             if (Debugging) {
               Serial.println("Door open.");
+              Serial.printf("wifiConnected: %i\n",wifiConnected);
             }
             if (wifiConnected) {
               mqtt.publish(pStatus, "door|open");
@@ -510,14 +521,11 @@ void setup() {
     if (Debugging) {
        Serial.println("RTC is not running");
     }
-    RTC.adjust(DateTime(__DATE__, __TIME__));
+    RTC.adjust(DateTime(__DATE__, __TIME__));  // try kick starting the clock with the compile time
   }
   if (Debugging) {
     DateTime now = RTC.now();
-    Serial.print("RTC time is: ");    
-    Serial.print(now.hour(),DEC);
-    Serial.print(":");
-    Serial.println(now.minute(),DEC);
+    Serial.printf("RTC time is: %0d:%0d\n",now.hour(),now.minute());    
   }
   
   if (Debugging) {
@@ -543,11 +551,12 @@ void setup() {
        Serial.println("IP address: ");
        Serial.println(WiFi.localIP());
     }
-    wifiConnected = false;
+    wifiConnected = true;
   } else {
     if (Debugging) {
        Serial.println("");
        Serial.println("WiFi UNconnected");
+       wifiConnected = false;
     }
   }
   
@@ -576,29 +585,12 @@ void setup() {
     Serial.println(mqtt.state());    
   }
 
-  mqtt.publish("client/online", "0");
   mqttConnected();
 
   //mqtt.connectedCb.attach(&mqttConnected);
   //mqtt.disconnectedCb.attach(&mqttDisconnected);
   //mqtt.publishedCb.attach(&mqttPublished);
   //mqtt.setCallback(&mqttData);
-
-  /**
-   * Setup pin modes
-   */
- 
-  // Pin defaults
-  digitalWrite(doorOpen, HIGH);
-  digitalWrite(doorClose, HIGH);
-  digitalWrite(doorTop, HIGH);
-  digitalWrite(doorBottom, HIGH);
-  
-  pinMode(doorOpen, OUTPUT);
-  pinMode(doorClose, OUTPUT);
-  pinMode(doorTop, INPUT_PULLUP);
-  pinMode(doorBottom, INPUT_PULLUP);
-
 
   // Findout door status
   int dt=digitalRead(doorTop);
@@ -609,19 +601,32 @@ void setup() {
        if (Debugging) {
            Serial.println("Door broken. Opened and closed simultaneously. Halting");
        }
+       if (wifiConnected) {
+          mqtt.publish(pStatus,"Door sensors are insane. Halting.");
+       }
        while(1);
        break;
     case 1:
        if(dt==0){
           doorState="open";
+          if (wifiConnected) {
+             mqtt.publish("coop/status", "door|open");
+          }
        } else {
           doorState="closed";
+          if (wifiConnected) {
+             mqtt.publish("coop/status", "door|closed");
+          }
        }
        break;
     case 2:
        doorState = "unknown";
+       if (wifiConnected) {
+          mqtt.publish("coop/status", "door|unknown");
+       }
        break;
   }
+
   if (Debugging) {
     Serial.print("Initial door state: ");
     Serial.println(doorState);
@@ -637,19 +642,6 @@ void loop() {
   if (millis() > 5000) {
 //    Serial.println("Loop...");
  
-    if (lastPublish == 0) {
-      // Send default values to ensure states are in sync at other end of MQTT connection
-
-      if (digitalRead(doorBottom == LOW)) {
-        doorState = "closed";
-        mqtt.publish("coop/status", "door|closed");
-      }
-      else if (digitalRead(doorTop == LOW)) {
-        doorState = "open";
-        mqtt.publish("coop/status", "door|open");
-      }
-    }
-
     // Read new data from sensors
     readSensors();
     
