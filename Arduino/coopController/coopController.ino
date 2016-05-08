@@ -6,7 +6,7 @@
  * \Forked by
  *       Pablo Sanchez <pablo@pablo-sanchez.com>
  * \ Description
- * This Sketch is designed to work on a ESP-8266 MUANODE 0.9 board
+ * This Sketch is designed to work on a ESP-8266 NodeMCU V0.9 board
  */
 
 #include <Wire.h>
