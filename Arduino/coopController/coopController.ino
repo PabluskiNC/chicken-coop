@@ -6,35 +6,37 @@
  * \Forked by
  *       Pablo Sanchez <pablo@pablo-sanchez.com>
  * \ Description
- * This Sketch is designed to work on a ESP-8266 NodeMCU V0.9 board
+ * This Sketch is designed to work on a ESP-8266 MUANODE 0.9 board
  */
 
-#include <Wire.h>
+#include <Wire.h>                 // https://www.arduino.cc/en/Reference/Wire
 #include <ESP8266WiFi.h>          // https://github.com/esp8266/Arduino
 #include <PubSubClient.h>         // https://github.com/knolleary/pubsubclient
-#include "RTClib.h"
+#include <Bounce2.h>              // https://github.com/thomasfredericks/Bounce2
+#include <RTClib.h>               // https://github.com/adafruit/RTClib
+#include "secrets.h"              // holds wifi credentials & MQTT credentials
 
 // print debug messages or not to serial
-const int Debugging = 1;
+int Debugging = 1; 
 
 // Digital & analog pins for various components
 
 const int lightSense    = A0; // Light Sensor
-const int doorOpen      = 12; // MotorA CCW UP
-const int doorClose     = 14; // MotorA CW DOWN
-const int doorTop       = 5; // Reed Switch
-const int doorBottom    = 4; // Reed Switch
-const int rtcSDA        = 0; // Real Time Clock SDA (i2c ESP8266 NodeMCU 0.9)
-const int rtcSCL        = 2; // Real Time Clock SCL (i2c ESP8266 NodeMCU 0.9)
+const int doorOpen      = D6; // MotorA CCW UP 
+const int doorClose     = D5; // MotorA CW DOWN
+const int doorTop       = D1; // Reed Switch
+const int doorBottom    = D2; // Reed Switch
+const int rtcSDA        = D3; // Real Time Clock SDA (i2c ESP8266 NodeMCU 0.9)
+const int rtcSCL        = D4; // Real Time Clock SCL (i2c ESP8266 NodeMCU 0.9)
 
-// WIFI Settings
-#define wHost "secure2"
-#define wPass "e28fiibgtybs"
+// WIFI Settings ** Moved to secrets.h **
+//#define wHost "wifi"
+//#define wPass "secret"
 
 // MQTT Host Settings
-#define mHost "isore.net"
-#define mPort 1883
-#define mClientID "coop-duino"
+//#define mHost "mqtt_host"
+//#define mPort 1883
+//#define mClientID "coop-duino"
 //#define mUsername "chicken_coop"
 //#define mPassword "secret"
 
@@ -54,16 +56,16 @@ const int rtcSCL        = 2; // Real Time Clock SCL (i2c ESP8266 NodeMCU 0.9)
 
 // Misc Settings
 const unsigned long millisPerDay    = 86400000; // Milliseconds per day
-const unsigned long debounceWait    =      200; // Door debounce timer (200 ms)
-const unsigned long lightReadRate   =    10000; // How often to read light level (5 sec)
+const unsigned long lightReadRate   =   10000; // How often to read light level (10 sec)
 const unsigned long remoteOverride  =   600000; // Length of time to lockout readings. (10 min)
-const unsigned long publishInterval =    60000; // How often to publish light sensor readings. (1 min)
+const unsigned long publishInterval =   600000; // How often to publish light sensor readings. (10 min)
 const int           lsLow           =        0; // Light Sensor lowest reading
 const int           lsHigh          =      900; // Light Sensor highest reading
+const unsigned long maxMotorOn      =    15000; // Maximum time for the motor to be on (15 seconds)
 
 // Night time lockout to prevent reaction to light sensor readings if an exterior light source causes
 // a reading otherwise bright enough to activate the interior light and/or door.
-const boolean       nightLock      =      true; // Enable night time lockout
+const boolean       nightLock      =      true; // Enable night time lockout 
 
 
 /*************************************************
@@ -78,6 +80,7 @@ unsigned long lastDebounce       =     0;
 unsigned long lastLightRead      =     0;
 unsigned long lastRTCSync        =     0;
 unsigned long remoteLockStart    =     0;
+unsigned long motorRunning       =     0;  // how long has the motor been on
 String        doorState          =    "Uninitialzed"; // Values will be one of: closed, closing, open, opening, unknown
 String        doorStatePrev      =    "";
 int           brightness         =     0;
@@ -90,10 +93,16 @@ int           doorBottomVal2     =     0;
 int           doorBottomState    =     0;
 int           doorBottomPrev     =     0;
 uint32_t      bootTime           =     0;
+int           motorHalted        =     0; // Motor protection in case of run away condition
+char          mqtt_msg_buf[100];
 
+// Define the hardware components
 RTC_DS1307 RTC;
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
+
+Bounce debounceTop = Bounce();
+Bounce debounceBot = Bounce();
 
 boolean wifiConnected = false;
 
@@ -140,11 +149,11 @@ void mqttConnected() {
      mqtt.subscribe(sRemote, 1);
 
      // Subscribe to sunrise/set updates
-     mqtt.subscribe(sSunRise, 1);
-     mqtt.subscribe(sSunSet, 1);
+ //    mqtt.subscribe(sSunRise, 1);
+ //    mqtt.subscribe(sSunSet, 1);
   
      // Publish that we're online!
-     mqtt.publish("client/online", "1");
+     mqtt.publish(pStatus, "online");
   } else {
      if (Debugging) {
        Serial.println("MQTT NOT Connected because WIFI is not connected");
@@ -192,11 +201,11 @@ void mqttDisconnected(void* response) {
  */
 void mqttData(char* topic, byte* payload, unsigned int plen) {
   
-  byte* p = (byte *)malloc(plen+1);
-  memset(p,'\0',plen+1);
-  memcpy(p,payload,plen);
-  String data  = String((char *) p);
-  free(p);
+  // Copy the payload to the MQTT message buffer
+  memset(mqtt_msg_buf,'\0',plen+1);
+  memcpy(mqtt_msg_buf,payload,plen);
+  String data  = String((char *) mqtt_msg_buf);
+
   
   if(Debugging) {
      Serial.print("mqttTopic*Len*Data: |");
@@ -232,7 +241,6 @@ void mqttData(char* topic, byte* payload, unsigned int plen) {
       }
     }
   }
-
 
   // Adjust sunrise/set times for nightlock
   if (strcmp(topic,sSunRise)==0) {
@@ -299,7 +307,7 @@ void publishReadings() {
   // online every time we update brightness and temp readings...
 
   if (wifiConnected) {
-     mqtt.publish("client/online", "1");
+     mqtt.publish(pStatus,"coop/online");
   }
   if (Debugging) {
       Serial.print("mqtt publish. Status: ");
@@ -311,39 +319,81 @@ void publishReadings() {
  * Handle movement of the door
  */
 void doorMove() {
-  debounceDoor();
+
+  if (motorHalted == 0 ) {
+    if(motorRunning > 0) {
+
+    if (motorRunning + maxMotorOn < millis()){
+      digitalWrite(doorClose, STOP);
+      digitalWrite(doorOpen, STOP);
+      
+      if (Debugging) {
+        Serial.println("Motor on too long - Halting!");
+      }
+      
+      if (doorStatePrev != doorState && wifiConnected) {
+        mqtt.publish(pStatus, "door|runaway");
+      }
+      motorHalted = 1;
+     }
+  }
+
   doorStatePrev = doorState;
   if (doorState == "closed" || doorState == "closing") {
     if (doorBottomState != 0) {
       // Door isn't closed, run motor until it is.
-      digitalWrite(doorClose, GO);
-      digitalWrite(doorOpen, STOP);
+      if(motorRunning == 0) {  // start your engines
+        digitalWrite(doorClose, GO);
+        digitalWrite(doorOpen, STOP);
+        motorRunning = millis();
+        if (Debugging) {
+          Serial.printf("Motor CLOSE ON: %i\n", motorRunning);
+        }
+      }
     }
     else {
+      if (motorRunning > 0) {
       // Door is closed, stop motor
       digitalWrite(doorClose, STOP);
       digitalWrite(doorOpen, STOP);
       doorState = "closed";
+      motorRunning = 0; // stop the motor running counter
       if (doorStatePrev != doorState && wifiConnected) {
-        mqtt.publish("coop/status", "door|closed");
+        mqtt.publish(pStatus, "door|closed");
+      }
+      if (Debugging) {
+          Serial.println("Motor CLOSE OFF");
+      }
       }
     }
   }
   else {
     if (doorTopState != 0) {
-      // Door isn't open, run motor until it is.
-      digitalWrite(doorClose, STOP);
-      digitalWrite(doorOpen, GO);
+      if(motorRunning == 0) {  // start your engines
+        // Door isn't open, run motor until it is.
+        digitalWrite(doorClose, STOP);
+        digitalWrite(doorOpen, GO);        motorRunning = millis();
+        if (Debugging) {
+          Serial.printf("Motor OPEN ON: %i \n",motorRunning);
+        }
+      }
     }
     else {
       // Door is open, stop motor.
+      if (motorRunning > 0) {
       digitalWrite(doorClose, STOP);
       digitalWrite(doorOpen, STOP);
       doorState = "open";
+      motorRunning = 0; // stop the motor running counter
       if (doorStatePrev != doorState && wifiConnected) {
-        mqtt.publish("coop/status", "door|open");
+        mqtt.publish(pStatus, "door|open");
+      }
+      if (Debugging) {
+        Serial.println("Motor OPEN OFF");
+      }
       }
     }
+  }
   }
 }
 
@@ -435,55 +485,6 @@ void handleSensorReadings() {
 }
 
 /**
- * Door switch debouncer
- */
-void debounceDoor() {
-  doorTopVal     = digitalRead(doorTop);
-  doorBottomVal  = digitalRead(doorBottom);
-  doorTopPrev    = doorTopState;
-  doorBottomPrev = doorBottomState;
-
-  if ((unsigned long)(millis() - lastDebounce) > debounceWait) {
-    doorTopVal2    = digitalRead(doorTop);
-    doorBottomVal2 = digitalRead(doorBottom);
-    if (doorTopVal == doorTopVal2) {
-      if (doorTopVal != doorTopState) {
-        doorTopState = doorTopVal;
-        if (doorTopState == 0) {
-          doorState = "open";
-          if (doorTopPrev != doorTopState) {
-            if (Debugging) {
-              Serial.println("Door open.");
-              Serial.printf("wifiConnected: %i\n",wifiConnected);
-            }
-            if (wifiConnected) {
-              mqtt.publish(pStatus, "door|open");
-            }
-          }
-        }
-      }
-    }
-    if (doorBottomVal == doorBottomVal2) {
-      if (doorBottomVal != doorBottomState) {
-        doorBottomState = doorBottomVal;
-        if (doorBottomState == 0) {
-          doorState = "closed";
-          if (doorBottomPrev != doorBottomState) {
-            if (Debugging) {
-              Serial.println("Door closed.");
-            }
-            if (wifiConnected) {
-              mqtt.publish(pStatus, "door|closed");
-            }
-          }
-        }
-      }
-    }
-    lastDebounce = millis();
-  }
-}
-
-/**
  * Initialization on startup.
  */
 void setup() {
@@ -494,23 +495,24 @@ void setup() {
   }
 
   // Set the outputs
-  digitalWrite(doorOpen, STOP);
+  digitalWrite(doorOpen, STOP);  // Set the moto control relays
   digitalWrite(doorClose, STOP);
-  digitalWrite(doorTop, HIGH);
-  digitalWrite(doorBottom, HIGH);
-  
   pinMode(doorOpen, OUTPUT);
   pinMode(doorClose, OUTPUT);
-  pinMode(doorTop, INPUT_PULLUP);
-  pinMode(doorBottom, INPUT_PULLUP);
 
-// Again, just in case
+  // Define the top & bottom sensors
+  pinMode(doorTop, INPUT_PULLUP);
+  debounceTop.attach(doorTop);
+  debounceTop.interval(5);  //inteval in ms
+  pinMode(doorBottom, INPUT_PULLUP);
+  debounceBot.attach(doorBottom);
+  debounceBot.interval(5);  //inteval in ms
+
+  // Again, just in case
   digitalWrite(doorOpen, STOP);
   digitalWrite(doorClose, STOP);
-  digitalWrite(doorTop, HIGH);
-  digitalWrite(doorBottom, HIGH);
 
-  
+  // Get the RTC going
   Wire.begin(rtcSDA,rtcSCL);
   if (! RTC.begin()) {
     Serial.println("Couldn't find RTC");
@@ -531,6 +533,8 @@ void setup() {
   if (Debugging) {
     Serial.println("ARDUINO: Setup WIFI");
   }
+
+  // Wifi Connect
   WiFi.disconnect();
   
   delay(1000);
@@ -538,25 +542,28 @@ void setup() {
   WiFi.onEvent(wifiCb);
   WiFi.begin(wHost, wPass);
   
-  while (WiFi.status() != WL_CONNECTED) { // &&  wifitry >0 ) {
+  int wifitry = 60; // try for 30 seconds then move on
+  while (WiFi.status() != WL_CONNECTED) &&  wifitry >0 ) {
     delay(500);
+    wifitry--;
     if (Debugging) {
        Serial.print(".");
     }
   }
+  
   if (WiFi.status() == WL_CONNECTED) {
+    wifiConnected = true;
     if (Debugging) {
        Serial.println("");
        Serial.println("WiFi connected");  
        Serial.println("IP address: ");
        Serial.println(WiFi.localIP());
     }
-    wifiConnected = true;
   } else {
+    wifiConnected = false;
     if (Debugging) {
        Serial.println("");
        Serial.println("WiFi UNconnected");
-       wifiConnected = false;
     }
   }
   
@@ -587,42 +594,42 @@ void setup() {
 
   mqttConnected();
 
-  //mqtt.connectedCb.attach(&mqttConnected);
-  //mqtt.disconnectedCb.attach(&mqttDisconnected);
-  //mqtt.publishedCb.attach(&mqttPublished);
-  //mqtt.setCallback(&mqttData);
 
   // Findout door status
-  int dt=digitalRead(doorTop);
-  int db=digitalRead(doorBottom);
-  switch (dt + db) {
+  debounceTop.update();
+  debounceBot.update();
+  
+  doorTopState    = debounceTop.read();
+  doorBottomState = debounceBot.read();
+
+  switch (doorTopState + doorBottomState) {
     case 0:
        doorState = "broken";
        if (Debugging) {
            Serial.println("Door broken. Opened and closed simultaneously. Halting");
        }
        if (wifiConnected) {
-          mqtt.publish(pStatus,"Door sensors are insane. Halting.");
+          mqtt.publish(pStatus,"door|insane");
        }
        while(1);
        break;
     case 1:
-       if(dt==0){
+       if(doorTopState==0){
           doorState="open";
           if (wifiConnected) {
-             mqtt.publish("coop/status", "door|open");
+             mqtt.publish(pStatus, "door|open");
           }
        } else {
           doorState="closed";
           if (wifiConnected) {
-             mqtt.publish("coop/status", "door|closed");
+             mqtt.publish(pStatus, "door|closed");
           }
        }
        break;
     case 2:
        doorState = "unknown";
        if (wifiConnected) {
-          mqtt.publish("coop/status", "door|unknown");
+          mqtt.publish(pStatus, "door|unknown");
        }
        break;
   }
@@ -640,8 +647,13 @@ void loop() {
   mqtt.loop();
   // 5 second pause on initial startup to let devices settle, wifi connect, etc.
   if (millis() > 5000) {
-//    Serial.println("Loop...");
- 
+    
+    // Update top & bottom switches
+    debounceTop.update();
+    doorTopState = debounceTop.read();
+    debounceBot.update();
+    doorBottomState = debounceBot.read();
+    
     // Read new data from sensors
     readSensors();
     
