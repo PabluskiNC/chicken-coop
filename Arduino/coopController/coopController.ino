@@ -17,12 +17,12 @@
 #include "secrets.h"              // holds wifi credentials & MQTT credentials
 
 // print debug messages or not to serial
-int Debugging = 0; 
+int Debugging = 0;
 
 // Digital & analog pins for various components
 
 const int lightSense    = A0; // Light Sensor
-const int doorOpen      = D6; // MotorA CCW UP 
+const int doorOpen      = D6; // MotorA CCW UP
 const int doorClose     = D5; // MotorA CW DOWN
 const int doorTop       = D1; // Reed Switch
 const int doorBottom    = D2; // Reed Switch
@@ -63,7 +63,7 @@ const unsigned long maxMotorOn      =    15000; // Maximum time for the motor to
 
 // Night time lockout to prevent reaction to light sensor readings if an exterior light source causes
 // a reading otherwise bright enough to activate the interior light and/or door.
-const boolean       nightLock      =      true; // Enable night time lockout 
+const boolean       nightLock      =      true; // Enable night time lockout
 
 /*************************************************
        DO   NOT   EDIT   BELOW   THIS   LINE
@@ -96,6 +96,7 @@ char          mqtt_msg_buf[100];
 
 // Define the hardware components
 RTC_DS1307 RTC;
+EspClass esp;
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
 
@@ -110,7 +111,7 @@ boolean wifiConnected = false;
  */
 void wifiCb(WiFiEvent_t event) {
   if (Debugging) {
-    Serial.printf("\n[WiFi-event] event: %d\n", event);  
+    Serial.printf("\n[WiFi-event] event: %d\n", event);
   }
 
   switch(event) {
@@ -121,6 +122,10 @@ void wifiCb(WiFiEvent_t event) {
             Serial.println(WiFi.localIP());
          }
          mqtt.connect(mClientID);
+         if ( !mqtt.connected() ) {
+            delay(100);
+            mqtt.connect(mClientID);
+         }
          wifiConnected = true;
          break;
      case WIFI_EVENT_STAMODE_DISCONNECTED:
@@ -152,7 +157,7 @@ void mqttConnected() {
      // Subscribe to sunrise/set updates
      mqtt.subscribe(sSunRise, 1);
      mqtt.subscribe(sSunSet, 1);
-  
+
      // Publish that we're online!
      mqtt.publish(pStatus, "mqttOnline");
   } else {
@@ -168,7 +173,7 @@ void mqttConnected() {
  * This allows us to remotely trigger events via WIFI!
  */
 void mqttData(char* topic, byte* payload, unsigned int plen) {
-  
+
   // Copy the payload to the MQTT message buffer
   memset(mqtt_msg_buf,'\0',plen+1);
   memcpy(mqtt_msg_buf,payload,plen);
@@ -192,7 +197,7 @@ void mqttData(char* topic, byte* payload, unsigned int plen) {
       remoteLockStart = 0;
       if(Debugging) {
         Serial.println("remoteLockStart unset");
-      }      
+      }
     }
     if (data == "debug") {
       Debugging=1;
@@ -220,7 +225,7 @@ void mqttData(char* topic, byte* payload, unsigned int plen) {
       Serial.println(nightLockEnd);
     }
   }
-  
+
   if (strcmp(topic,sSunSet)==0) {
     nightLockStart = atoi(data.c_str());
     if (Debugging) {
@@ -279,11 +284,11 @@ void doorMove() {
     if (motorRunning + maxMotorOn < millis()){
       digitalWrite(doorClose, STOP);
       digitalWrite(doorOpen, STOP);
-      
+
       if (Debugging) {
         Serial.println("Motor on too long - Halting!");
       }
-      
+
       if (doorStatePrev != doorState && wifiConnected) {
         mqtt.publish(pStatus, "door|runaway");
       }
@@ -360,14 +365,19 @@ void readSensors() {
     brightness = map(brightness, 0, 1023, 0, 100);  // Remap value to a 0-100 scale
     brightness = constrain(brightness, 0, 100);     // constrain value to 0-100 scale
     lastLightRead = millis();
-    
+
     char buf[100];
-    String pubString = String(brightness);; 
+    String pubString = String(brightness);;
     pubString.toCharArray(buf, pubString.length()+1);
-    if (wifiConnected) { 
+    if (wifiConnected) {
        mqtt.publish(pLight, buf);
     }
-
+      if (Debugging) {
+        Serial.print("Free mem: ");
+        Serial.println(esp.getFreeHeap());
+        Serial.print("Millis: ");
+        Serial.println(millis());
+      }
     if (Debugging) {
       Serial.print("Brightness is ");
       Serial.println(brightness);
@@ -380,7 +390,7 @@ void readSensors() {
  * Respond to updated sensor data.
  */
 void handleSensorReadings() {
-  
+
   // Light based reactions
   // ---------------------
 
@@ -480,35 +490,34 @@ void setup() {
   }
   if (Debugging) {
     DateTime now = RTC.now();
-    Serial.printf("RTC time is: %0d:%0d\n",now.hour(),now.minute());    
+    Serial.printf("RTC time is: %0d:%0d\n",now.hour(),now.minute());
   }
-  
+
   if (Debugging) {
     Serial.println("ARDUINO: Setup WIFI");
   }
 
   // Wifi Connect
   WiFi.disconnect();
-  
-  delay(1000);
-  
-  WiFi.onEvent(wifiCb);
+
+  delay(200);
+
   WiFi.begin(wHost, wPass);
-  
+
   int wifitry = 60; // try for 30 seconds then move on
   while (WiFi.status() != WL_CONNECTED &&  wifitry >0 ) {
-    delay(500);
+    delay(100);
     wifitry--;
     if (Debugging) {
        Serial.print(".");
     }
   }
-  
+
   if (WiFi.status() == WL_CONNECTED) {
     wifiConnected = true;
     if (Debugging) {
        Serial.println("");
-       Serial.println("WiFi connected");  
+       Serial.println("WiFi connected");
        Serial.println("IP address: ");
        Serial.println(WiFi.localIP());
     }
@@ -519,7 +528,7 @@ void setup() {
        Serial.println("WiFi UNconnected");
     }
   }
-  
+
   if (Debugging) {
     Serial.println("ARDUINO: Setup MQTT client");
     Serial.print("Client|port: ");
@@ -527,23 +536,29 @@ void setup() {
     Serial.print("|");
     Serial.println(mPort);
   }
-  
+
   mqtt.setCallback(&mqttData);
   mqtt.setServer(mHost, mPort);  // client_id, port
   mqtt.connect(mClientID);
 
-  delay(500);
-  
-  if ( !mqtt.connected() ) { 
+  delay(100);
+  if ( !mqtt.connected() ) {
+     mqtt.connect(mClientID);
+     delay(100);
+  }
+
+  if ( !mqtt.connected() ) {
     if (Debugging) {
       Serial.println("ARDUINO: Failed to setup MQTT");
-    }   
+    }
   }
 
   if (Debugging) {
     Serial.print("MQTT Status: ");
-    Serial.println(mqtt.state());    
+    Serial.println(mqtt.state());
   }
+
+  WiFi.onEvent(wifiCb);
 
   mqttConnected();
 
@@ -551,7 +566,7 @@ void setup() {
   // Findout door status
   debounceTop.update();
   debounceBot.update();
-  
+
   doorTopState    = debounceTop.read();
   doorBottomState = debounceBot.read();
 
@@ -597,19 +612,20 @@ void setup() {
  * Main program loop
  */
 void loop() {
+
   mqtt.loop();
   // 5 second pause on initial startup to let devices settle, wifi connect, etc.
   if (millis() > 5000) {
-    
+
     // Update top & bottom switches
     debounceTop.update();
     doorTopState = debounceTop.read();
     debounceBot.update();
     doorBottomState = debounceBot.read();
-    
+
     // Read new data from sensors
     readSensors();
-    
+
     if (remoteLockStart == 0 ||
         (unsigned long)(millis() - remoteLockStart) > remoteOverride) {
       // Respond ot sensor data
