@@ -14,21 +14,23 @@
 #include <PubSubClient.h>         // https://github.com/knolleary/pubsubclient
 #include <Bounce2.h>              // https://github.com/thomasfredericks/Bounce2
 #include <RTClib.h>               // https://github.com/adafruit/RTClib
+#include <LiquidCrystal_I2C.h>
 #include "secrets.h"              // holds wifi credentials & MQTT credentials
+#include "pins.h"                 // holds pin definitions
 
 // print debug messages or not to serial
 int Debugging = 1;
 
-// Digital & analog pins for various components
-
-const int lightSense    = A0; // Light Sensor
-
-const int doorTop       = D1; // Reed Switch
-const int doorBottom    = D2; // Reed Switch
-const int rtcSDA        = D3; // Real Time Clock SDA (i2c ESP8266 NodeMCU 0.9)
-const int rtcSCL        = D4; // Real Time Clock SCL (i2c ESP8266 NodeMCU 0.9)
-const int doorClose     = D5; // MotorA CW DOWN
-const int doorOpen      = D6; // MotorA CCW UP
+//// Digital & analog pins for various components
+//
+//const int lightSense    = A0; // Light Sensor
+//
+//const int doorTop       = D1; // Reed Switch
+//const int doorBottom    = D2; // Reed Switch
+//const int rtcSDA        = D3; // Real Time Clock SDA (i2c ESP8266 NodeMCU 0.9)
+//const int rtcSCL        = D4; // Real Time Clock SCL (i2c ESP8266 NodeMCU 0.9)
+//const int doorClose     = D5; // MotorA CW DOWN
+//const int doorOpen      = D6; // MotorA CCW UP
 
 // WIFI Settings ** Moved to secrets.h **
 //#define wHost "wifi"
@@ -43,13 +45,13 @@ const int doorOpen      = D6; // MotorA CCW UP
 
 // MQTT Subscription Channels
 #define sTime    "time/beacon"
-#define sRemote  "coop/remotetrigger"
+#define sRemote  "coop2/remotetrigger"
 #define sSunRise "sun/rise"
 #define sSunSet  "sun/set"
 
 // MQTT Publish Channels
-#define pLight  "coop/brightness"
-#define pStatus "coop/status"
+#define pLight  "coop2/brightness"
+#define pStatus "coop2/status"
 
 // DOOR motion
 #define GO     0
@@ -94,11 +96,13 @@ int           doorBottomPrev     =     0;
 uint32_t      bootTime           =     0;
 int           motorHalted        =     0; // Motor protection in case of run away condition
 char          mqtt_msg_buf[100];
+DateTime      now;
 
 // Define the hardware components
 RTC_DS1307 RTC;
 EspClass esp;
 WiFiClient espClient;
+LiquidCrystal_I2C lcd(0x27, 16, 2);
 PubSubClient mqtt(espClient);
 
 // Setup debounce software
@@ -241,7 +245,7 @@ void mqttData(char* topic, byte* payload, unsigned int plen) {
       RTC.adjust(strtoul(data.c_str(), NULL, 0));
       lastRTCSync = millis();
       if (Debugging) {
-        DateTime now = RTC.now();
+        now = RTC.now();
         char dateStr[11];
         char timeStr[9];
 
@@ -378,6 +382,8 @@ void readSensors() {
         Serial.println(esp.getFreeHeap());
         Serial.print("Millis: ");
         Serial.println(millis());
+        Serial.print("MQTT State: ");
+        Serial.println(mqtt.state());
       }
     if (Debugging) {
       Serial.print("Brightness is ");
@@ -397,7 +403,7 @@ void handleSensorReadings() {
 
   // Fetch current time from RTC
 
-  DateTime now = RTC.now();
+  now = RTC.now();
   // If nightlock is enabled, and we are within the designated time period, simply
   // ensure door is closed.
   //if(Debugging) {
@@ -456,9 +462,9 @@ void setup() {
     Serial.begin(115200);
     Serial.println("Initialising...");
     Serial.println("Setting motor status to STOP");
+    Serial.println(pStatus);
   }
 
-  // Set the outputs
   digitalWrite(doorOpen, STOP);  // Set the moto control relays
   digitalWrite(doorClose, STOP);
   pinMode(doorOpen, OUTPUT);
@@ -478,6 +484,13 @@ void setup() {
 
   // Get the RTC going
   Wire.begin(rtcSDA,rtcSCL);
+  lcd.init();
+  lcd.init();
+  lcd.backlight();
+  lcd.print(" coopController ");
+  lcd.setCursor(0,1);
+  lcd.print(">Pablo  Sanchez<");
+  // Set the outputs
   if (! RTC.begin()) {
     Serial.println("Couldn't find RTC");
     while (1);
@@ -490,7 +503,7 @@ void setup() {
     RTC.adjust(DateTime(__DATE__, __TIME__));  // try kick starting the clock with the compile time
   }
   if (Debugging) {
-    DateTime now = RTC.now();
+    now = RTC.now();
     Serial.printf("RTC time is: %0d:%0d\n",now.hour(),now.minute());
   }
 
@@ -516,6 +529,9 @@ void setup() {
 
   if (WiFi.status() == WL_CONNECTED) {
     wifiConnected = true;
+    lcd.clear();
+    lcd.print("IP:");
+    lcd.print(WiFi.localIP());
     if (Debugging) {
        Serial.println("");
        Serial.println("WiFi connected");
@@ -524,6 +540,8 @@ void setup() {
     }
   } else {
     wifiConnected = false;
+    lcd.clear();
+    lcd.print("No WiFi");
     if (Debugging) {
        Serial.println("");
        Serial.println("WiFi UNconnected");
@@ -563,7 +581,6 @@ void setup() {
 
   mqttConnected();
 
-
   // Findout door status
   debounceTop.update();
   debounceBot.update();
@@ -578,6 +595,10 @@ void setup() {
            Serial.println("Door broken. Opened and closed simultaneously. Halting");
        }
        if (wifiConnected) {
+          lcd.clear();
+          lcd.print("Motor Insane");
+          lcd.setCursor(0,1);
+          lcd.print("Halting.");
           mqtt.publish(pStatus,"door|insane");
        }
        while(1);
@@ -613,7 +634,11 @@ void setup() {
  * Main program loop
  */
 void loop() {
-
+  lcd.setCursor(0,1);
+  now = RTC.now();
+  char buf[16];
+  sprintf(buf,"%02d:%02d",now.hour(),now.minute());
+  lcd.print(buf);
   mqtt.loop();
   // 5 second pause on initial startup to let devices settle, wifi connect, etc.
   if (millis() > 5000) {
@@ -637,3 +662,4 @@ void loop() {
     doorMove();
   }
 }
+
